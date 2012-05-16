@@ -1,6 +1,6 @@
 #!/bin/bash
 # /etc/init.d/minecraft
-# version 2012-04-26 (YYYY-MM-DD)
+# version 2012-05-16 (YYYY-MM-DD)
 # Luke Hanley
 # Dependencies: screen zip
  
