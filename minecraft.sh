@@ -42,6 +42,14 @@ ext=.zip
  declare -a worlds=($worldlist)
  numworlds=${#worlds[@]}
  
+ HTTPCONSOLE_URL="http://127.0.0.1:8765"
+ 
+function console_command
+{
+    w3m -dump_source $HTTPCONSOLE_URL/console?command=${*// /%20}
+}
+
+ 
 ## The Java command to run the server
  
 # Nothing special, just start the server.
@@ -75,99 +83,112 @@ as_user() {
   fi
 }
  
-## Start the server executable as a service
+## Checks for the minecraft servers screen session. (returns true if it exists)
  
-mc_start() {
-  if ps ax | grep -v grep | grep -v -i SCREEN | grep $SERVICE > /dev/null
-  then
-    PID="`ps ax | grep -v grep | grep -v -i SCREEN | grep $SERVICE | awk '{print $1}'`"
-    failure && echo " * $SERVERNAME was already running! (pid $PID)"
-    exit 1;
-  else
-    echo " * $SERVERNAME was not already running. Starting..."
-    echo " * Using worlds named \"$worldlist\"..."
-    cd $MCPATH
-    as_user "cd $MCPATH && screen -dmS minecraft $INVOCATION"
-    sleep 10
-    echo " * Checking $SERVERNAME is running..."
- 
+ is_running(){
     if ps ax | grep -v grep | grep -v -i SCREEN | grep $SERVICE > /dev/null
     then
-      PID="`ps ax | grep -v grep | grep -v -i SCREEN | grep $SERVICE | awk '{print $1}'`"
-      success && echo " * $SERVERNAME is now running. (pid $PID)"
-    else
-      failure && echo " * Could not start $SERVERNAME."
-      exit 1; 
+        return 0
     fi
- 
-  fi
+    return 1
 }
  
-## Stop the executable
+## Start the server
+ 
+mc_start() {
+    cd $MCPATH
+    as_user "cd $MCPATH && screen -dmS minecraft $INVOCATION"
+    #
+    # Waiting for the server to start
+    #
+    seconds=0
+    until ps ax | grep -v grep | grep -v -i SCREEN | grep $SERVICE > /dev/null
+    do
+        sleep 1 
+        seconds=$seconds+1
+        if [[ $seconds -eq 5 ]]
+        then
+            echo "Still not running, waiting a while longer..."
+        fi
+        if [[ $seconds -ge 25 ]]
+        then
+            echo "Failed to start, aborting."
+            exit 1
+        fi
+    done    
+    echo "$SERVERNAME is running."
+ 
+}
+ 
+## Stop the server
  
 mc_stop() {
-  if ps ax | grep -v grep | grep -v -i SCREEN | grep $SERVICE > /dev/null
-  then
-    PID="`ps ax | grep -v grep | grep -v -i SCREEN | grep $SERVICE | awk '{print $1}'`"
-    echo " * $SERVERNAME is running (pid $PID). Commencing shutdown..."
-    echo " * Notifying users of shutdown..."
-    as_user "screen -p 0 -S minecraft -X eval 'stuff \"say SERVER SHUTTING DOWN IN 10 SECONDS. Saving map...\"\015'"
-    echo " * Saving worlds named \"$worldlist\" to disk..."
-    as_user "screen -p 0 -S minecraft -X eval 'stuff \"save-all\"\015'"
-    sleep 10
-    echo " * Stopping $SERVERNAME..."
-    as_user "screen -p 0 -S minecraft -X eval 'stuff \"stop\"\015'"
-    sleep 10
-  else
-    failure && echo " * $SERVERNAME was not running!"
-	echo "Exiting, please start the server first!"
-    exit 1;
-  fi
- 
-  if ps ax | grep -v grep | grep -v -i SCREEN | grep $SERVICE > /dev/null
-  then
-    failure && echo " * $SERVERNAME could not be shutdown! Still running..."
-    exit 1;
-  else
-    success && echo " * $SERVERNAME is shut down."
-  fi
+    console_command "say If you are in a arena, do /ma leave NOW!"
+	echo "Saving worlds..."
+	console_command "save-all"
+	sleep 6
+    echo "Force ending each arena..."
+    console_command "ma force end arena"
+    console_command "ma force end biolab"
+    console_command "ma force end hotel"
+    sleep 3
+    console_command "say See you later!"
+    sleep 1
+	echo "Stopping server..."
+	console_command "stop"
+	sleep 0.5
+	#
+	# Waiting for the server to shut down
+	#
+	seconds=0
+	while ps ax | grep -v grep | grep -v -i SCREEN | grep $SERVICE > /dev/null
+	do
+		sleep 1 
+		seconds=$seconds+1
+		if [[ $seconds -eq 5 ]]
+		then
+			echo "Still not shut down, waiting a while longer..."
+		fi
+		if [[ $seconds -ge 25 ]]
+		then
+			#logger -t minecraft-init "Failed to shut down server, aborting."
+			echo "Failed to shut down, aborting."
+			exit 1
+		fi
+	done	
+	echo "$SERVERNAME is now shut down."
 }
- 
- 
+  
 ## Set the server read-only, save the map, and have Linux sync filesystem buffers to disk
  
 mc_saveoff() {
-  if ps ax | grep -v grep | grep -v -i SCREEN | grep $SERVICE > /dev/null
-  then
-    echo " * $SERVERNAME is running. Commencing save..."
-    echo " * Notifying users of save..."
-    as_user "screen -p 0 -S minecraft -X eval 'stuff \"say Starting multiworld save...\"\015'"
-    echo " * Setting server read-only..."
-    as_user "screen -p 0 -S minecraft -X eval 'stuff \"save-off\"\015'"
-    echo " * Saving worlds to disk..."
-    as_user "screen -p 0 -S minecraft -X eval 'stuff \"save-all\"\015'"
-    sync
-    sleep 10
-    success && echo " * Worlds saved to disk."
-  else
-    failure && echo "$SERVERNAME was not running. Not suspending saves."
-  fi
+  	if is_running
+	then
+		echo "$SERVERNAME is running... suspending saves"
+		console_command "save-off"
+		console_command "save-all"
+		sync
+		sleep 10
+	else
+		echo "$SERVERNAME was not running. Not suspending saves."
+	fi
+  
+  
 }
  
 ## Set the server read-write
  
 mc_saveon() {
-  if ps ax | grep -v grep | grep -v -i SCREEN | grep $SERVICE > /dev/null
-  then
-    echo " * $SERVERNAME is running. Re-enabling saves..."
-    as_user "screen -p 0 -S minecraft -X eval 'stuff \"say Worlds saved.\"\015'"
-    as_user "screen -p 0 -S minecraft -X eval 'stuff \"save-on\"\015'"
-  else
-    failure && echo " * $SERVERNAME was not running. Not resuming saves."
-  fi
+	if is_running
+	then
+		echo "$SERVERNAME is running... Re-enabling saves"
+		console_command "save-on"
+	else
+		echo "$SERVERNAME was not running. Not resuming saves."
+	fi
+  
 }
  
-
 ## Backs up world by zipping it to the backup directory
  
 mc_backupmap() {
@@ -186,9 +207,9 @@ echo "Starting multiworld backup..."
     for ((i=0;i<$numworlds;i++)); do
         as_user "cd $MCPATH && zip $BACKUPPATH$hdateformat -r ${worlds[$i]}"
         echo "Saving '${worlds[$i]}' to '$BACKUPPATH$hdateformat'."
-		echo
+        echo
     done
-	echo "Backup complete."
+    echo "Backup complete."
     as_user "cp $BACKUPPATH$hdateformat $BACKUPPATH$ddateformat"
     echo "Updated daily backup."
 }
@@ -205,8 +226,8 @@ echo "Starting multiworld backup..."
     else
         as_user "mkdir -p $BACKUPPATH"
     fi
-	as_user "cd $MCPATH && zip $BACKUPPATH$alldateformat -r *"
-	echo "Full Minecraft Backup Complete"
+    as_user "cd $MCPATH && zip $BACKUPPATH$alldateformat -r *"
+    echo "Full Minecraft Backup Complete"
  
 }
 
@@ -229,7 +250,7 @@ mc_logrotate() {
   # Look at all the logfiles
   for i in $LOGLIST; do
     LOGTMP=$(ls $i | cut -d "." -f 3)
-	
+    
     # If we're working with server.log then append .0
     if [ -z $LOGTMP ]
     then
@@ -257,96 +278,90 @@ mc_logrotate() {
 ## Check if server is running and display PID
  
 mc_status() {
-  if ps ax | grep -v grep | grep -v -i SCREEN | grep $SERVICE > /dev/null
-  then
-    PID="`ps ax | grep -v grep | grep -v -i SCREEN | grep $SERVICE | awk '{print $1}'`"
-    echo " * $SERVERNAME (pid $PID) is running..."
-  else
-    echo " * $SERVERNAME is not running."
-    exit 1; # keep this exit in here so info doesn't run if server isn't active
-  fi
+	if is_running
+	then
+		PID="`ps ax | grep -v grep | grep -v -i SCREEN | grep $SERVICE | awk '{print $1}'`"
+        echo " * $SERVERNAME (pid $PID) is running..."
+	else
+		echo " * $SERVERNAME is not running."
+        exit 1; # keep this exit in here so info doesn't run if server isn't active
+	fi
 }
  
 ## Display some extra informaton
  
 mc_info() {
-  if ps ax | grep -v grep | grep -v -i SCREEN | grep $SERVICE > /dev/null
-  then
-    PID="`ps ax | grep -v grep | grep -v -i SCREEN | grep $SERVICE | awk '{print $1}'`"
-    JAVAPATH="`alternatives --display java | grep currently | cut -d " " -f 6`"
-    RSS="`ps -p $PID --format rss | tail -n 1`"
-    echo " - Java Path          : "$JAVAPATH""
-    echo " - Start Command      : "$INVOCATION""
-    echo " - Server Path        : "$MCPATH""
-    echo " - World Names        : ${cc_green}"$worldlist"${cc_normal}"
-    echo " - Process ID        : "$PID""
-    echo " - Memory Usage      : `expr $RSS / 1024` Mb ($RSS kb)"
-    echo
-    echo " - Lag Mem : "
-    as_user "screen -p 0 -S minecraft -X eval 'stuff \"lagmem\"\015'"
-    sleep 1
-    tail $MCPATH/server.log | grep -m 1 "TPS"
-    tail $MCPATH/server.log | grep -m 1 "free"
-    echo
-    echo " - Active Connections : "
-    netstat -tna | grep -E "Proto|25565"
-    echo
-    echo " - Online Players : "
-    as_user "screen -p 0 -S minecraft -X eval 'stuff \"list\"\015'"
-    sleep 1
-    tail $MCPATH/server.log | grep -m 1 "There are"
-    tail $MCPATH/server.log | grep -m 1 "Connected"
-  else
-    echo " * $SERVERNAME is not running."
-  fi
+	if is_running
+	then
+		PID="`ps ax | grep -v grep | grep -v -i SCREEN | grep $SERVICE | awk '{print $1}'`"
+        JAVAPATH="`alternatives --display java | grep currently | cut -d " " -f 6`"
+        RSS="`ps -p $PID --format rss | tail -n 1`"
+        echo " - Java Path          : "$JAVAPATH""
+        echo " - Start Command      : "$INVOCATION""
+        echo " - Server Path        : "$MCPATH""
+        echo " - World Names        : ${cc_green}"$worldlist"${cc_normal}"
+        echo " - Process ID        : "$PID""
+        echo " - Memory Usage      : `expr $RSS / 1024` Mb ($RSS kb)"
+        echo
+        echo " - Lag Mem : "
+        console_command "lagmem"
+        echo
+        echo " - Active Connections : "
+        netstat -tna | grep -E "Proto|25565"
+        echo
+        echo " - Online Players : "
+        console_command "list"
+	else
+		echo " * $SERVERNAME is not running."
+	fi
+  
 }
 
 ## Access console
  
 mc_console() {
-
-  if ps ax | grep -v grep | grep -v -i SCREEN | grep $SERVICE > /dev/null
-  then
-     ME=`whoami`
-    if [ $ME == $USERNAME ] ; then
-     clear
-     echo "${cc_red}STOP AND READ"
-     echo
-     echo "Also bug Luke to get this finished."
-     echo
-     echo "${cc_normal}PLEASE! ${cc_red}DEATTACH from the screen ${cc_normal}after you have finished!"
-     echo
-     echo "${cc_green}Do this by Pressing${cc_red} Ctrl-A then Ctrl-D ${cc_normal}"
-     echo
-     echo "or just close the window..."
-     sleep 6
-     echo
-     echo
-     echo
-     as_user "screen -x minecraft"
-  else
-#     clear
-#     echo "${cc_red}STOP AND READ"
-#     echo
-#     echo "Also bug Luke to get this finished."
-#     echo
-#     echo "${cc_normal}PLEASE! ${cc_red}DEATTACH from the screen ${cc_normal}after you have finished!"
-#     echo
-#     echo "${cc_green}Do this by Pressing${cc_red} Ctrl-A then Ctrl-D ${cc_normal}"
-#    echo
-#    echo "or just close the window..."
-#    sleep 3
-#    echo
-#    echo
-#    echo
-    screen -x MinecraftConsole
-    exit
-  fi
+	if is_running
+	then
+        ME=`whoami`
+        if [ $ME == $USERNAME ] ; then
+            clear
+            echo "${cc_red}STOP AND READ"
+            echo
+            echo "Also bug Luke to get this finished."
+            echo
+            echo "${cc_normal}PLEASE! ${cc_red}DEATTACH from the screen ${cc_normal}after you have finished!"
+            echo
+            echo "${cc_green}Do this by Pressing${cc_red} Ctrl-A then Ctrl-D ${cc_normal}"
+            echo
+            echo "or just close the window..."
+            sleep 6
+            echo
+            echo
+            echo
+            as_user "screen -x minecraft"
+        else
+#           We shall skip this information. We are pros.
+#           clear
+#           echo "${cc_red}STOP AND READ"
+#           echo
+#           echo "Also bug Luke to get this finished."
+#           echo
+#           echo "${cc_normal}PLEASE! ${cc_red}DEATTACH from the screen ${cc_normal}after you have finished!"
+#           echo
+#           echo "${cc_green}Do this by Pressing${cc_red} Ctrl-A then Ctrl-D ${cc_normal}"
+#           echo
+#           echo "or just close the window..."
+#           sleep 3
+#           echo
+#           echo
+#           echo
+            screen -x MinecraftConsole
+            exit
+        fi
+	else
+		echo " * $SERVERNAME is not running."
+	fi
   
-  else
-    echo " * $SERVERNAME is not running."
-    exit 1; # keep this exit in here so info doesn't run if server isn't active
-  fi
 }
 
 ## Start root console screen
@@ -404,7 +419,6 @@ mc_consolerestart() {
   
 }
 
-
 ## TODO: clear these up so the request for log lines can be made from the shell. Eg. "mc log 50" or "mc log 125"
  
 mc_log() {
@@ -412,7 +426,6 @@ mc_log() {
  echo
  echo "Last 25 lines of log"
 }
-
 mc_log50() {
  as_user "tail -n 50 $MCPATH/server.log"
  echo
@@ -427,44 +440,50 @@ mc_livelog() {
  echo
  tail -n 25 -f $MCPATH/server.log
 }
-mc_lagmem() {
- as_user "screen -p 0 -S minecraft -X eval 'stuff \"lagmem\"\015'"
- sleep 1
- tail $MCPATH/server.log | grep -m 1 "TPS"
- tail $MCPATH/server.log | grep -m 1 "free"
-}
-mc_list() {
- as_user "screen -p 0 -S minecraft -X eval 'stuff \"list\"\015'"
- sleep 1
- tail $MCPATH/server.log | grep -m 1 "There are"
- tail $MCPATH/server.log | grep -m 1 "Connected"
-}
 
 ## These are the parameters passed to the script
  
 case "$1" in
   start)
-mc_start
-mc_consolestart
+        if is_running; then
+            echo "Server already running."
+        else
+            mc_start
+            mc_consolestart
+        fi
 ;;
   stop)
-mc_stop
-mc_consolestop
+        if is_running; then
+            console_command "say SERVER SHUTTING DOWN IN 10 SECONDS."
+            mc_stop
+            mc_consolestop
+        else
+            echo "Server not running."
+        fi
 ;;
   restart)
-mc_stop
-mc_start
-mc_consolerestart
+        if is_running; then
+            console_command "say SERVER RESTARTING IN 10 SECONDS."
+            mc_stop
+            mc_start
+            mc_consolerestart
+        else
+            echo "Server not running."
+        fi
 ;;
   backupmap)
-mc_saveoff
-mc_backupmap
-mc_saveon
+        console_command "say Starting multiworld backup..."
+        mc_saveoff
+        mc_backupmap
+        mc_saveon
+        console_command "say Backup complete!"
 ;;
   backupall)
-mc_saveoff
-mc_backupall
-mc_saveon
+        console_command "say Starting full server backup..."
+        mc_saveoff
+        mc_backupall
+        mc_saveon
+        console_command "say Backup complete!"
 ;;
   status)
 mc_status
@@ -496,10 +515,10 @@ mc_consolestop
 mc_consolestart
 ;;
   list)
-mc_list
+        console_command "list"
 ;;
   lagmem)
-mc_lagmem
+        console_command "lagmem"
 ;;
 # These are intended for cron usage, not regular users.
   removeoldbackups)
